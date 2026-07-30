@@ -59,6 +59,13 @@ pub enum MessageRole {
     Assistant,
     System,
     Tool,
+    /// Injected scaffolding/context that agents emit around the conversation
+    /// rather than as a genuine turn: Codex `<environment_context>` /
+    /// `<recommended_plugins>` and AGENTS.md preambles, Claude `<command-name>`
+    /// / `<local-command-caveat>`, slash-command metadata, etc. Kept separate
+    /// from `System` so each agent's tooling noise can be grouped and filtered
+    /// independently of real system messages.
+    Context,
 }
 
 impl MessageRole {
@@ -68,6 +75,7 @@ impl MessageRole {
             MessageRole::Assistant => "assistant",
             MessageRole::System => "system",
             MessageRole::Tool => "tool",
+            MessageRole::Context => "context",
         }
     }
 
@@ -77,6 +85,7 @@ impl MessageRole {
             "assistant" => Some(MessageRole::Assistant),
             "system" => Some(MessageRole::System),
             "tool" => Some(MessageRole::Tool),
+            "context" => Some(MessageRole::Context),
             _ => None,
         }
     }

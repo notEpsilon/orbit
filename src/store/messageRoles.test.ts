@@ -13,3 +13,7 @@ for (const role of expectedEnabled) {
 if (defaults.has("system")) {
   throw new Error("expected system messages to be hidden by default");
 }
+
+if (defaults.has("context")) {
+  throw new Error("expected context messages to be hidden by default");
+}

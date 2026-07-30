@@ -13,7 +13,7 @@ export type AgentType =
 
 export const ALL_AGENTS: AgentType[] = ["antigravity", "claude", "codex", "copilot", "cursor", "jetbrains", "kilo", "opencode", "qoder", "warp", "zcode"];
 
-export type MessageRole = "user" | "assistant" | "system" | "tool";
+export type MessageRole = "user" | "assistant" | "system" | "tool" | "context";
 export type AttachmentType = "image" | "file" | "diff";
 
 export interface Session {

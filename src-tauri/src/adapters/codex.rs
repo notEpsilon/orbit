@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 
+use super::context::is_context_content;
 use super::{AgentAdapter, PlatformPaths, SessionLocation};
 use crate::models::*;
 
@@ -97,18 +98,6 @@ fn extract_text_from_content(content: &serde_json::Value) -> String {
         return parts.join("\n");
     }
     String::new()
-}
-
-fn is_preamble(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.starts_with("<environment_context>")
-        || trimmed.starts_with("<turn_aborted>")
-        || trimmed.starts_with("<permissions instructions>")
-        || trimmed.starts_with("# AGENTS.md instructions for ")
-        || trimmed.starts_with("# AGENTS.md instructions\n")
-        || trimmed.starts_with("# Context from my IDE setup")
-        || trimmed.starts_with("# AGENTS.md from")
-        || trimmed.starts_with("# Codebase Context")
 }
 
 fn codex_file_operation_for(tool_name: &str) -> String {
@@ -297,10 +286,20 @@ impl AgentAdapter for CodexAdapter {
                                 payload.get("content").unwrap_or(&serde_json::Value::Null),
                             );
 
+                            // Codex records `<environment_context>`,
+                            // `<recommended_plugins>`, AGENTS.md preambles, etc.
+                            // as user/system turns. Reclassify that scaffolding
+                            // as Context so it groups separately from real turns.
+                            let role =
+                                if role == MessageRole::User && is_context_content(&msg_content) {
+                                    MessageRole::Context
+                                } else {
+                                    role
+                                };
+
                             if role == MessageRole::User
                                 && title.is_empty()
                                 && !msg_content.trim().is_empty()
-                                && !is_preamble(&msg_content)
                             {
                                 title = msg_content.chars().take(100).collect();
                             }
@@ -393,9 +392,17 @@ impl AgentAdapter for CodexAdapter {
                                 .unwrap_or("")
                                 .to_string();
 
-                            if title.is_empty()
+                            // Same context reclassification as the
+                            // `response_item` message branch above.
+                            let role = if is_context_content(&msg_content) {
+                                MessageRole::Context
+                            } else {
+                                MessageRole::User
+                            };
+
+                            if role == MessageRole::User
+                                && title.is_empty()
                                 && !msg_content.trim().is_empty()
-                                && !is_preamble(&msg_content)
                             {
                                 title = msg_content.chars().take(100).collect();
                             }
@@ -403,7 +410,7 @@ impl AgentAdapter for CodexAdapter {
                             messages.push(Message {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 session_id: session_id.clone(),
-                                role: MessageRole::User,
+                                role,
                                 content: msg_content,
                                 timestamp: timestamp.clone(),
                                 sequence: seq,
@@ -574,6 +581,51 @@ mod tests {
             adapter.resume_command("019e9481-bb65-72f3-a053-27f3c85d7671", ""),
             "codex resume '019e9481-bb65-72f3-a053-27f3c85d7671'"
         );
+    }
+
+    #[tokio::test]
+    async fn classifies_environment_and_plugin_preambles_as_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rollout-2026-07-21T10-00-00-test.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-07-21T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{",
+                "\"id\":\"ses_ctx\",\"cwd\":\"/tmp/proj\"}}\n",
+                "{\"timestamp\":\"2026-07-21T10:00:05Z\",\"type\":\"response_item\",\"payload\":{",
+                "\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":",
+                "\"<recommended_plugins> Here is a list of plugins.\\n</recommended_plugins>\"}]}}\n",
+                "{\"timestamp\":\"2026-07-21T10:00:10Z\",\"type\":\"response_item\",\"payload\":{",
+                "\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":",
+                "\"<environment_context> <cwd>/tmp/proj</cwd> </environment_context>\"}]}}\n",
+                "{\"timestamp\":\"2026-07-21T10:00:15Z\",\"type\":\"event_msg\",\"payload\":{",
+                "\"type\":\"user_message\",\"message\":\"Build me a landing page\"}}\n",
+                "{\"timestamp\":\"2026-07-21T10:00:20Z\",\"type\":\"event_msg\",\"payload\":{",
+                "\"type\":\"agent_message\",\"message\":\"On it.\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let adapter = CodexAdapter::new();
+        let parsed = adapter.parse_session(&path).await.unwrap();
+
+        // First two messages are preambles -> Context, not User.
+        assert_eq!(parsed.messages.len(), 4);
+        assert_eq!(parsed.messages[0].role, MessageRole::Context);
+        assert!(parsed.messages[0]
+            .content
+            .starts_with("<recommended_plugins>"));
+        assert_eq!(parsed.messages[1].role, MessageRole::Context);
+        assert!(parsed.messages[1]
+            .content
+            .starts_with("<environment_context>"));
+
+        // The real user turn is still User and supplies the title.
+        assert_eq!(parsed.messages[2].role, MessageRole::User);
+        assert_eq!(parsed.messages[2].content, "Build me a landing page");
+        assert_eq!(parsed.messages[3].role, MessageRole::Assistant);
+
+        assert_eq!(parsed.session.title, "Build me a landing page");
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 import type { Message } from "../../types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ToolCall } from "./ToolCall";
-import { Bot, Terminal, User } from "lucide-react";
+import { Bot, FileText, Terminal, User } from "lucide-react";
 import { isDisplayableMessage } from "./messageVisibility";
 
 interface MessageBubbleProps {
@@ -17,6 +17,7 @@ export function MessageBubble({ message, searchQuery }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
   const isTool = message.role === "tool";
+  const isContext = message.role === "context";
 
   if (isTool && message.tool_name) {
     return (
@@ -41,11 +42,17 @@ export function MessageBubble({ message, searchQuery }: MessageBubbleProps) {
           block: "border-amber-500/35 bg-amber-500/10",
           label: "System",
         }
-      : {
-          icon: "bg-fuchsia-500/15 text-fuchsia-300",
-          block: "border-fuchsia-500/35 bg-fuchsia-500/10",
-          label: "Assistant",
-        };
+      : isContext
+        ? {
+            icon: "bg-slate-500/15 text-slate-300",
+            block: "border-slate-500/35 bg-slate-500/10",
+            label: "Context",
+          }
+        : {
+            icon: "bg-fuchsia-500/15 text-fuchsia-300",
+            block: "border-fuchsia-500/35 bg-fuchsia-500/10",
+            label: "Assistant",
+          };
 
   return (
     <article className={`rounded-lg border-l-4 ${styles.block}`}>
@@ -57,6 +64,8 @@ export function MessageBubble({ message, searchQuery }: MessageBubbleProps) {
             <User className="h-4 w-4" />
           ) : isSystem ? (
             <Terminal className="h-4 w-4" />
+          ) : isContext ? (
+            <FileText className="h-4 w-4" />
           ) : (
             <Bot className="h-4 w-4" />
           )}

@@ -1,6 +1,7 @@
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
+pub mod context;
 pub mod copilot;
 pub mod cursor;
 pub mod jetbrains;

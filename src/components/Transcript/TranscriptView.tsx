@@ -12,6 +12,7 @@ const ROLES: { role: MessageRole; label: string; activeClass: string }[] = [
   { role: "assistant", label: "assistant", activeClass: "border-fuchsia-400 bg-fuchsia-400/10 text-fuchsia-400" },
   { role: "tool", label: "tool", activeClass: "border-green-400 bg-green-400/10 text-green-400" },
   { role: "system", label: "system", activeClass: "border-amber-400 bg-amber-400/10 text-amber-400" },
+  { role: "context", label: "context", activeClass: "border-slate-400 bg-slate-400/10 text-slate-400" },
 ];
 
 export function TranscriptView() {

@@ -256,8 +256,8 @@ impl Indexer {
 
 fn parser_version(adapter_id: &str) -> &'static str {
     match adapter_id {
-        "codex" => "7",
-        "claude" => "3",
+        "codex" => "8",
+        "claude" => "4",
         "cursor" => "6",
         "opencode" => "3",
         "qoder" => "3",
