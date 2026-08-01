@@ -8,6 +8,18 @@ use crate::models::*;
 
 pub struct CodexAdapter;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConversationSource {
+    ResponseItem,
+    EventMessage,
+}
+
+struct ConversationEntry {
+    message_index: usize,
+    source: ConversationSource,
+    line_number: usize,
+}
+
 impl CodexAdapter {
     pub fn new() -> Self {
         Self
@@ -66,6 +78,81 @@ impl CodexAdapter {
                     });
                 }
             }
+        }
+    }
+}
+
+fn mirrored_event_index(
+    first: &ConversationEntry,
+    second: &ConversationEntry,
+    messages: &[Message],
+) -> Option<usize> {
+    let (event, response) = match (first.source, second.source) {
+        (ConversationSource::EventMessage, ConversationSource::ResponseItem) => (first, second),
+        (ConversationSource::ResponseItem, ConversationSource::EventMessage) => (second, first),
+        _ => return None,
+    };
+
+    if event.line_number.abs_diff(response.line_number) > 1 {
+        return None;
+    }
+
+    let event_message = &messages[event.message_index];
+    let response_message = &messages[response.message_index];
+    let timestamps_match = response_message
+        .timestamp
+        .as_ref()
+        .zip(event_message.timestamp.as_ref())
+        .map(|(response_timestamp, event_timestamp)| {
+            response_timestamp
+                .signed_duration_since(event_timestamp.clone())
+                .num_milliseconds()
+                .unsigned_abs()
+                <= 1_000
+        })
+        .unwrap_or(false);
+
+    (response_message.role == event_message.role
+        && response_message.content == event_message.content
+        && timestamps_match)
+        .then_some(event.message_index)
+}
+
+fn discard_mirrored_event_messages(
+    messages: &mut Vec<Message>,
+    conversation_entries: &[ConversationEntry],
+    file_touches: &mut [FileTouch],
+) {
+    let mut discarded = vec![false; messages.len()];
+    for pair in conversation_entries.windows(2) {
+        if let Some(event_index) = mirrored_event_index(&pair[0], &pair[1], messages) {
+            discarded[event_index] = true;
+        }
+    }
+
+    if !discarded.iter().any(|discard| *discard) {
+        return;
+    }
+
+    let original_messages = std::mem::take(messages);
+    let mut sequence_by_old_sequence = vec![None; original_messages.len()];
+    let mut retained = Vec::with_capacity(original_messages.len());
+
+    for (index, mut message) in original_messages.into_iter().enumerate() {
+        if discarded[index] {
+            continue;
+        }
+
+        let sequence = retained.len() as u32;
+        sequence_by_old_sequence[message.sequence as usize] = Some(sequence);
+        message.sequence = sequence;
+        retained.push(message);
+    }
+    *messages = retained;
+
+    for touch in file_touches {
+        if let Some(Some(sequence)) = sequence_by_old_sequence.get(touch.sequence as usize) {
+            touch.sequence = *sequence;
         }
     }
 }
@@ -185,8 +272,9 @@ impl AgentAdapter for CodexAdapter {
         let mut output_tokens: u64 = 0;
         let mut cached_tokens: u64 = 0;
         let mut reasoning_tokens: u64 = 0;
+        let mut conversation_entries = Vec::new();
 
-        for line in content.lines() {
+        for (line_number, line) in content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
@@ -304,6 +392,7 @@ impl AgentAdapter for CodexAdapter {
                                 title = msg_content.chars().take(100).collect();
                             }
 
+                            let message_index = messages.len();
                             messages.push(Message {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 session_id: session_id.clone(),
@@ -314,6 +403,11 @@ impl AgentAdapter for CodexAdapter {
                                 tool_name: None,
                                 tool_input: None,
                                 tool_output: None,
+                            });
+                            conversation_entries.push(ConversationEntry {
+                                message_index,
+                                source: ConversationSource::ResponseItem,
+                                line_number,
                             });
                             seq += 1;
                         }
@@ -407,6 +501,7 @@ impl AgentAdapter for CodexAdapter {
                                 title = msg_content.chars().take(100).collect();
                             }
 
+                            let message_index = messages.len();
                             messages.push(Message {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 session_id: session_id.clone(),
@@ -417,6 +512,11 @@ impl AgentAdapter for CodexAdapter {
                                 tool_name: None,
                                 tool_input: None,
                                 tool_output: None,
+                            });
+                            conversation_entries.push(ConversationEntry {
+                                message_index,
+                                source: ConversationSource::EventMessage,
+                                line_number,
                             });
                             seq += 1;
                         }
@@ -429,6 +529,7 @@ impl AgentAdapter for CodexAdapter {
                                 .to_string();
 
                             if !msg_content.trim().is_empty() {
+                                let message_index = messages.len();
                                 messages.push(Message {
                                     id: uuid::Uuid::new_v4().to_string(),
                                     session_id: session_id.clone(),
@@ -439,6 +540,11 @@ impl AgentAdapter for CodexAdapter {
                                     tool_name: None,
                                     tool_input: None,
                                     tool_output: None,
+                                });
+                                conversation_entries.push(ConversationEntry {
+                                    message_index,
+                                    source: ConversationSource::EventMessage,
+                                    line_number,
                                 });
                                 seq += 1;
                             }
@@ -494,6 +600,8 @@ impl AgentAdapter for CodexAdapter {
                 _ => continue,
             }
         }
+
+        discard_mirrored_event_messages(&mut messages, &conversation_entries, &mut file_touches);
 
         if title.is_empty() {
             let dir_name = path
@@ -626,6 +734,50 @@ mod tests {
         assert_eq!(parsed.messages[3].role, MessageRole::Assistant);
 
         assert_eq!(parsed.session.title, "Build me a landing page");
+    }
+
+    #[tokio::test]
+    async fn prefers_response_items_over_adjacent_event_message_mirrors() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("rollout-2026-08-01T10-00-00-mirrors.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-08-01T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"ses_mirrors\"}}\n",
+                "{\"timestamp\":\"2026-08-01T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"Repeat\"}}\n",
+                "{\"timestamp\":\"2026-08-01T10:00:01.010Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Repeat\"}}\n",
+                "{\"timestamp\":\"2026-08-01T10:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Mirrored reply\"}}\n",
+                "{\"timestamp\":\"2026-08-01T10:00:02.010Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"Mirrored reply\"}}\n",
+                "{\"timestamp\":\"2026-08-01T10:00:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Legacy-only\"}}\n",
+                "{\"timestamp\":\"2026-08-01T10:00:04Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"Response-only\"}}\n",
+                "{\"timestamp\":\"2026-08-01T10:00:05Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Repeat\"}}\n",
+                "{\"timestamp\":\"2026-08-01T10:00:06Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":\"{\\\"file_path\\\":\\\"/tmp/example.rs\\\"}\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let parsed = CodexAdapter::new().parse_session(&path).await.unwrap();
+
+        let messages: Vec<(&MessageRole, &str, u32)> = parsed
+            .messages
+            .iter()
+            .map(|message| (&message.role, message.content.as_str(), message.sequence))
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                (&MessageRole::User, "Repeat", 0),
+                (&MessageRole::Assistant, "Mirrored reply", 1),
+                (&MessageRole::User, "Legacy-only", 2),
+                (&MessageRole::Assistant, "Response-only", 3),
+                (&MessageRole::User, "Repeat", 4),
+                (&MessageRole::Tool, "", 5),
+            ]
+        );
+        assert_eq!(parsed.file_touches.len(), 1);
+        assert_eq!(parsed.file_touches[0].sequence, 5);
     }
 
     #[tokio::test]
