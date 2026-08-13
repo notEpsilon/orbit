@@ -15,6 +15,7 @@ pub enum AgentType {
     Warp,
     Antigravity,
     Zcode,
+    Grok,
 }
 
 impl AgentType {
@@ -31,6 +32,7 @@ impl AgentType {
             AgentType::Warp => "warp",
             AgentType::Antigravity => "antigravity",
             AgentType::Zcode => "zcode",
+            AgentType::Grok => "grok",
         }
     }
 
@@ -47,6 +49,7 @@ impl AgentType {
             "warp" => Some(AgentType::Warp),
             "antigravity" => Some(AgentType::Antigravity),
             "zcode" => Some(AgentType::Zcode),
+            "grok" => Some(AgentType::Grok),
             _ => None,
         }
     }

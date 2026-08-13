@@ -128,6 +128,7 @@ their source session files.
 | Codex | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | ✅ Launch |
 | Cursor | ✅ | ✅ | Opens project | 🧪 | 📋 Copy command | ✅ Opens project |
 | GitHub Copilot CLI | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | Planned |
+| Grok | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | ✅ Launch |
 | JetBrains AI | ✅ | ✅ | Not available | 🧪 | 📋 Session ID | Planned |
 | Kilo Code | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | ✅ Launch |
 | OpenCode | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | ✅ Launch |
@@ -179,9 +180,9 @@ remain untouched and can be indexed again.
 - macOS is the primary development and release platform.
 - Windows adapter discovery is implemented and unit-tested, but still needs
   native Windows build and runtime verification.
-- Linux is supported for local development with Claude Code, Codex, Cursor, Kilo Code, OpenCode, and
-  ZCode discovery. Local AppImage generation is verified on the current
-  Ubuntu development machine only.
+- Linux is supported for local development with Claude Code, Codex, Cursor, Grok,
+  Kilo Code, OpenCode, and ZCode discovery. Local AppImage generation is verified
+  on the current Ubuntu development machine only.
 - App bundles are not signed or notarized yet.
 - Session formats can change when agent vendors update their tools.
 - Orbit refreshes sessions on manual reindex; live file watching is not enabled

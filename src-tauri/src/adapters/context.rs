@@ -9,7 +9,7 @@
 /// real turn. Detection is by leading tag/prefix only (after trimming), so it
 /// never matches a genuine message that merely *mentions* one of these tags.
 ///
-/// Covers both agents Orbit supports today:
+/// Covers the agents Orbit supports today:
 /// - **Codex**: `<environment_context>`, `<recommended_plugins>`,
 ///   `<user_instructions>`, `<permissions instructions>`, `<turn_aborted>`,
 ///   and the `# AGENTS.md ...` / `# Context from my IDE setup` /
@@ -17,6 +17,8 @@
 /// - **Claude**: `<command-name>`, `<command-message>`, `<command-args>`,
 ///   `<local-command-caveat>`, `<local-command-stdout>`,
 ///   `<local-command-stderr>`, `<system-reminder>`.
+/// - **Grok**: `<user_info>` workspace preamble (plus Claude's
+///   `<system-reminder>` tags, which Grok also emits).
 pub fn is_context_content(text: &str) -> bool {
     let trimmed = text.trim_start();
 
@@ -39,6 +41,8 @@ pub fn is_context_content(text: &str) -> bool {
         || trimmed.starts_with("<local-command-stdout>")
         || trimmed.starts_with("<local-command-stderr>")
         || trimmed.starts_with("<system-reminder>")
+        // --- Grok CLI injected workspace preamble ---
+        || trimmed.starts_with("<user_info>")
 }
 
 #[cfg(test)]
@@ -70,11 +74,26 @@ mod tests {
     fn detects_claude_command_scaffolding() {
         assert!(is_context_content("<local-command-caveat>..."));
         assert!(is_context_content("<command-name>/model</command-name>"));
-        assert!(is_context_content("<command-message>model</command-message>"));
+        assert!(is_context_content(
+            "<command-message>model</command-message>"
+        ));
         assert!(is_context_content("<command-args></command-args>"));
-        assert!(is_context_content("<local-command-stdout>ok</local-command-stdout>"));
-        assert!(is_context_content("<local-command-stderr>err</local-command-stderr>"));
-        assert!(is_context_content("<system-reminder>follow the plan</system-reminder>"));
+        assert!(is_context_content(
+            "<local-command-stdout>ok</local-command-stdout>"
+        ));
+        assert!(is_context_content(
+            "<local-command-stderr>err</local-command-stderr>"
+        ));
+        assert!(is_context_content(
+            "<system-reminder>follow the plan</system-reminder>"
+        ));
+    }
+
+    #[test]
+    fn detects_grok_user_info_scaffolding() {
+        assert!(is_context_content(
+            "<user_info>\nOS Version: macos\nWorkspace Path: /tmp/orbit\n</user_info>"
+        ));
     }
 
     #[test]
@@ -87,7 +106,9 @@ mod tests {
         assert!(!is_context_content("Fix the login bug please"));
         assert!(!is_context_content("What does <command-name> mean?"));
         // A message that merely *mentions* a tag (not starting with it) is real.
-        assert!(!is_context_content("I saw <recommended_plugins> in the log"));
+        assert!(!is_context_content(
+            "I saw <recommended_plugins> in the log"
+        ));
     }
 
     #[test]

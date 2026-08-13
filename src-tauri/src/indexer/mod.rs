@@ -265,6 +265,7 @@ fn parser_version(adapter_id: &str) -> &'static str {
         "jetbrains" => "3",
         "kilo" => "1",
         "zcode" => "2",
+        "grok" => "1",
         _ => "0",
     }
 }

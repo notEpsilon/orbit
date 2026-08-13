@@ -4,6 +4,7 @@ pub mod codex;
 pub mod context;
 pub mod copilot;
 pub mod cursor;
+pub mod grok;
 pub mod jetbrains;
 pub mod kilo;
 pub mod opencode;
@@ -60,6 +61,7 @@ mod tests {
     use super::codex::CodexAdapter;
     use super::copilot::CopilotAdapter;
     use super::cursor::CursorAdapter;
+    use super::grok::GrokAdapter;
     use super::jetbrains::JetBrainsAdapter;
     use super::opencode::OpenCodeAdapter;
     use super::qoder::QoderAdapter;
@@ -159,6 +161,7 @@ mod tests {
             ZCodeAdapter::windows_db_path(&paths),
             Some(home.join(".zcode").join("cli").join("db").join("db.sqlite"))
         );
+        assert_eq!(GrokAdapter::windows_home(&paths), Some(home.join(".grok")));
     }
 
     #[test]
@@ -204,6 +207,10 @@ mod tests {
             "Start-Process Qoder"
         );
         assert_eq!(WarpAdapter::windows_resume_command(), "Start-Process Warp");
+        assert_eq!(
+            GrokAdapter::windows_resume_command("session-3", r"C:\Work\Orbit"),
+            "Set-Location 'C:\\Work\\Orbit'; grok --resume 'session-3'"
+        );
     }
 }
 
@@ -247,6 +254,7 @@ impl AdapterRegistry {
         reg.register(Box::new(warp::WarpAdapter::new()));
         reg.register(Box::new(antigravity::AntigravityAdapter::new()));
         reg.register(Box::new(zcode::ZCodeAdapter::new()));
+        reg.register(Box::new(grok::GrokAdapter::new()));
         reg
     }
 
