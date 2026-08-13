@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.9.0
+
+### New Agent Adapter
+
+- **Grok** — indexes official xAI Grok Build CLI sessions from `~/.grok/sessions/` (or `$GROK_HOME/sessions`); reads `summary.json` metadata and `chat_history.jsonl` transcripts
+- Conversation-focused parsing: user queries, assistant replies, and tool calls/results
+- Classifies Grok scaffolding (`<user_info>`, `<system-reminder>`, system prompt) as Orbit's Context role
+- Skips encrypted reasoning blobs and backend tool-call records
+- Resume via `grok --resume <session-id>`; active sessions from `active_sessions.json` plus live PID
+- Windows discovery under `%USERPROFILE%\.grok` with a copyable PowerShell resume command
+
+### Documentation
+
+- Added Grok to the supported-agents table and Linux local-dev platform notes
+
+### Technical
+
+- Added `GrokAdapter` with JSONL + summary parsing, file-touch extraction, and multi-platform resume
+- Extended shared context detection for Grok `<user_info>` preambles
+- Registered `grok` in backend `AgentType`, frontend labels/colors, and parser version `1`
+- Version bumped to 0.9.0
+
 ## v0.6.0
 
 ### New Agent Adapters
