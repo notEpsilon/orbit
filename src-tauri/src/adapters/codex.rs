@@ -576,21 +576,23 @@ impl AgentAdapter for CodexAdapter {
                             {
                                 if let Some(n) = usage.get("input_tokens").and_then(|v| v.as_u64())
                                 {
-                                    input_tokens = input_tokens.saturating_add(n);
+                                    input_tokens = n;
                                 }
                                 if let Some(n) = usage.get("output_tokens").and_then(|v| v.as_u64())
                                 {
-                                    output_tokens = output_tokens.saturating_add(n);
+                                    output_tokens = n;
                                 }
                                 if let Some(n) =
                                     usage.get("cached_input_tokens").and_then(|v| v.as_u64())
                                 {
-                                    cached_tokens = cached_tokens.saturating_add(n);
+                                    cached_tokens = n;
                                 }
-                                if let Some(n) =
-                                    usage.get("reasoning_tokens").and_then(|v| v.as_u64())
+                                if let Some(n) = usage
+                                    .get("reasoning_output_tokens")
+                                    .or_else(|| usage.get("reasoning_tokens"))
+                                    .and_then(|v| v.as_u64())
                                 {
-                                    reasoning_tokens = reasoning_tokens.saturating_add(n);
+                                    reasoning_tokens = n;
                                 }
                             }
                         }
@@ -883,5 +885,32 @@ mod tests {
             .collect();
         assert!(ops.contains("read"));
         assert!(ops.contains("edit"));
+    }
+
+    #[tokio::test]
+    async fn uses_latest_cumulative_token_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("rollout-2026-04-19T18-06-30-tokens.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"timestamp\":\"2026-04-19T18:00:00Z\",\"type\":\"event_msg\",\"payload\":{",
+                "\"type\":\"token_count\",\"info\":{\"total_token_usage\":{",
+                "\"input_tokens\":100,\"output_tokens\":50,\"cached_input_tokens\":80,",
+                "\"reasoning_output_tokens\":10}}}}\n",
+                "{\"timestamp\":\"2026-04-19T18:00:10Z\",\"type\":\"event_msg\",\"payload\":{",
+                "\"type\":\"token_count\",\"info\":{\"total_token_usage\":{",
+                "\"input_tokens\":150,\"output_tokens\":70,\"cached_input_tokens\":100,",
+                "\"reasoning_output_tokens\":30}}}}\n",
+            ),
+        )
+        .unwrap();
+
+        let parsed = CodexAdapter::new().parse_session(&path).await.unwrap();
+
+        assert_eq!(parsed.session.input_tokens, 150);
+        assert_eq!(parsed.session.output_tokens, 70);
+        assert_eq!(parsed.session.cached_tokens, 100);
+        assert_eq!(parsed.session.reasoning_tokens, 30);
     }
 }
