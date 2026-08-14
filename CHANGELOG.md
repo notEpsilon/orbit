@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.10.0
+
+### New Agent Adapter
+
+- **DeepSeek Harness** — indexes `dsh` sessions from the harness home (`$DSH_HOME/sessions` or `~/.dsh/sessions`); supports both installation methods: npm (`npx @deepseek-ai/dsh web`) and local source builds (`pnpm dsh web`)
+- Reads the harness's session logs (`session.jsonl` and the default Zstandard-compressed `session.jsonl.zstd`), tolerating crash-orphaned torn frames
+- Conversation-focused parsing: user prompts, assistant replies (text only; reasoning excluded), and paired tool calls/results with file-touch extraction
+- Classifies harness-injected scaffolding (runtime-context snapshots, AGENTS.md preambles, skill content) as Orbit's Context role via `source.kind`
+- Titles from the harness's own `session/title` events (LLM-generated titles win), plus model and token usage from the log
+- Resume smartly resolves the active installation: `dsh web` when the binary is on `$PATH`, `pnpm dsh web` from a discovered local checkout, else `npx @deepseek-ai/dsh web`
+
+### Fixes
+
+- **Qoder** — show real user messages from plaintext transcripts instead of the session title (Qoder DB user content is encrypted)
+- **Codex** — retain cumulative token snapshots so token totals stay accurate across re-indexes
+
+### Documentation
+
+- Added DeepSeek Harness to the supported-agents table
+
+### Technical
+
+- Added `DshAdapter` with JSONL + zstd parsing, session-event decoding, tool-call/result pairing, and install-aware multi-platform resume
+- Added `zstd` dependency for decompressing compressed session logs
+- Registered `dsh` in backend `AgentType`, frontend labels/colors, and adapter registry
+- Version bumped to 0.10.0
+
 ## v0.9.0
 
 ### New Agent Adapter
