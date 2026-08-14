@@ -127,6 +127,7 @@ their source session files.
 | Claude Code | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | ✅ Launch |
 | Codex | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | ✅ Launch |
 | Cursor | ✅ | ✅ | Opens project | 🧪 | 📋 Copy command | ✅ Opens project |
+| DeepSeek Harness | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | ✅ Launch |
 | GitHub Copilot CLI | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | Planned |
 | Grok | ✅ | ✅ | ✅ Launch | 🧪 | 📋 Copy command | ✅ Launch |
 | JetBrains AI | ✅ | ✅ | Not available | 🧪 | 📋 Session ID | Planned |

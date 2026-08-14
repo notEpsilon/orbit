@@ -4,6 +4,7 @@ pub mod codex;
 pub mod context;
 pub mod copilot;
 pub mod cursor;
+pub mod dsh;
 pub mod grok;
 pub mod jetbrains;
 pub mod kilo;
@@ -61,6 +62,7 @@ mod tests {
     use super::codex::CodexAdapter;
     use super::copilot::CopilotAdapter;
     use super::cursor::CursorAdapter;
+    use super::dsh::DshAdapter;
     use super::grok::GrokAdapter;
     use super::jetbrains::JetBrainsAdapter;
     use super::opencode::OpenCodeAdapter;
@@ -162,6 +164,10 @@ mod tests {
             Some(home.join(".zcode").join("cli").join("db").join("db.sqlite"))
         );
         assert_eq!(GrokAdapter::windows_home(&paths), Some(home.join(".grok")));
+        assert_eq!(
+            DshAdapter::windows_sessions_root(&paths),
+            Some(home.join(".dsh").join("sessions"))
+        );
     }
 
     #[test]
@@ -255,6 +261,7 @@ impl AdapterRegistry {
         reg.register(Box::new(antigravity::AntigravityAdapter::new()));
         reg.register(Box::new(zcode::ZCodeAdapter::new()));
         reg.register(Box::new(grok::GrokAdapter::new()));
+        reg.register(Box::new(dsh::DshAdapter::new()));
         reg
     }
 

@@ -10,9 +10,10 @@ export type AgentType =
   | "qoder"
   | "antigravity"
   | "zcode"
-  | "grok";
+  | "grok"
+  | "dsh";
 
-export const ALL_AGENTS: AgentType[] = ["antigravity", "claude", "codex", "copilot", "cursor", "grok", "jetbrains", "kilo", "opencode", "qoder", "warp", "zcode"];
+export const ALL_AGENTS: AgentType[] = ["antigravity", "claude", "codex", "copilot", "cursor", "dsh", "grok", "jetbrains", "kilo", "opencode", "qoder", "warp", "zcode"];
 
 export type MessageRole = "user" | "assistant" | "system" | "tool" | "context";
 export type AttachmentType = "image" | "file" | "diff";
@@ -105,6 +106,7 @@ export const AGENT_COLORS: Record<AgentType, string> = {
   antigravity: "bg-violet-500",
   zcode: "bg-amber-500",
   grok: "bg-stone-400",
+  dsh: "bg-rose-500",
 };
 
 export const AGENT_CHART_COLORS: Record<AgentType, string> = {
@@ -120,6 +122,7 @@ export const AGENT_CHART_COLORS: Record<AgentType, string> = {
   antigravity: "#a78bfa",
   zcode: "#fbbf24",
   grok: "#a8a29e",
+  dsh: "#fb7185",
 };
 
 export const AGENT_TEXT_COLORS: Record<AgentType, string> = {
@@ -135,6 +138,7 @@ export const AGENT_TEXT_COLORS: Record<AgentType, string> = {
   antigravity: "text-violet-300",
   zcode: "text-amber-300",
   grok: "text-stone-300",
+  dsh: "text-rose-300",
 };
 
 export const AGENT_TINTS: Record<AgentType, string> = {
@@ -150,6 +154,7 @@ export const AGENT_TINTS: Record<AgentType, string> = {
   antigravity: "bg-violet-400/10 border-violet-400/20",
   zcode: "bg-amber-400/10 border-amber-400/20",
   grok: "bg-stone-400/10 border-stone-400/20",
+  dsh: "bg-rose-400/10 border-rose-400/20",
 };
 
 export const AGENT_LABELS: Record<AgentType, string> = {
@@ -165,6 +170,7 @@ export const AGENT_LABELS: Record<AgentType, string> = {
   antigravity: "Antigravity",
   zcode: "ZCode",
   grok: "Grok",
+  dsh: "DeepSeek Harness",
 };
 
 export interface TerminalInfo {
