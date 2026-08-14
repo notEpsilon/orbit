@@ -31,6 +31,10 @@ pub struct QoderAdapter {
 struct QoderDbSnapshot {
     sessions: Vec<QoderSessionRow>,
     messages: HashMap<String, Vec<QoderMessageRow>>,
+    /// Plaintext user messages per session (timestamp ms + content), loaded
+    /// from the transcript JSONL files under
+    /// `~/.qoder/projects/<project>/transcript/`.
+    user_messages: HashMap<String, Vec<(i64, String)>>,
 }
 
 #[derive(Clone)]
@@ -49,6 +53,35 @@ struct QoderMessageRow {
     role: String,
     tool_result: Option<String>,
     gmt_create: i64,
+    token_info: Option<String>,
+}
+
+/// Parses Qoder's `chat_message.token_info` JSON, e.g.
+/// `{"prompt_tokens":13777,"completion_tokens":185,"cached_tokens":0,...}`.
+/// Returns `(input, output, cached)` tokens. `prompt_tokens` follows the
+/// OpenAI convention and includes the cached portion, so the cached share is
+/// subtracted to keep Orbit's input/cached buckets separate. Malformed or
+/// missing values yield zeros.
+fn parse_token_info(token_info: Option<&str>) -> (u64, u64, u64) {
+    let Some(raw) = token_info.filter(|s| !s.trim().is_empty()) else {
+        return (0, 0, 0);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return (0, 0, 0);
+    };
+    let prompt = value
+        .get("prompt_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let completion = value
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cached = value
+        .get("cached_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    (prompt.saturating_sub(cached), completion, cached)
 }
 
 impl QoderAdapter {
@@ -138,7 +171,7 @@ impl QoderAdapter {
         if !session_ids.is_empty() {
             let mut msg_stmt = conn
                 .prepare(
-                    "SELECT id, session_id, role, tool_result, gmt_create
+                    "SELECT id, session_id, role, tool_result, gmt_create, token_info
                      FROM chat_message
                      WHERE session_id = ?1
                      ORDER BY gmt_create ASC",
@@ -153,6 +186,7 @@ impl QoderAdapter {
                             role: row.get::<_, String>(2)?,
                             tool_result: row.get::<_, Option<String>>(3)?,
                             gmt_create: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                            token_info: row.get::<_, Option<String>>(5)?,
                         })
                     })
                     .map_err(|e| format!("Failed to query messages for {}: {}", sid, e))?
@@ -162,7 +196,112 @@ impl QoderAdapter {
             }
         }
 
-        Ok(QoderDbSnapshot { sessions, messages })
+        let user_messages = Self::transcript_projects_root()
+            .map(|root| Self::scan_transcript_user_messages(&root))
+            .unwrap_or_default();
+
+        Ok(QoderDbSnapshot {
+            sessions,
+            messages,
+            user_messages,
+        })
+    }
+
+    /// Directory holding Qoder's per-project plaintext transcripts.
+    fn transcript_projects_root() -> Option<PathBuf> {
+        dirs::home_dir().map(|home| home.join(".qoder").join("projects"))
+    }
+
+    /// Scans `<root>/*/transcript/*.jsonl` and collects the plaintext user
+    /// messages for each session. The SQLite DB stores user content
+    /// encrypted; these transcript files are the readable copy.
+    fn scan_transcript_user_messages(root: &Path) -> HashMap<String, Vec<(i64, String)>> {
+        let mut map: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+        let Ok(project_entries) = std::fs::read_dir(root) else {
+            return map;
+        };
+        for project_entry in project_entries.flatten() {
+            let transcript_dir = project_entry.path().join("transcript");
+            let Ok(file_entries) = std::fs::read_dir(&transcript_dir) else {
+                continue;
+            };
+            for file_entry in file_entries.flatten() {
+                let path = file_entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Ok(contents) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let mut session_id: Option<String> = None;
+                let mut user_msgs = Vec::new();
+                for line in contents.lines() {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    if session_id.is_none() {
+                        session_id = value
+                            .get("sessionId")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    if let Some(text) = Self::extract_transcript_user_message(&value) {
+                        let ts = value
+                            .get("timestamp")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                            .map(|dt| dt.timestamp_millis())
+                            .unwrap_or(0);
+                        user_msgs.push((ts, text));
+                    }
+                }
+                let sid = session_id
+                    .or_else(|| path.file_stem().map(|s| s.to_string_lossy().to_string()));
+                if let Some(sid) = sid {
+                    if !user_msgs.is_empty() {
+                        map.entry(sid).or_default().extend(user_msgs);
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// Pops the plaintext user message whose timestamp best matches the DB
+    /// row's `gmt_create` (they are written within ~1ms of each other). The
+    /// transcript may only cover recent turns of a session, so positional
+    /// pairing would misalign; unmatched rows yield `None`.
+    fn take_matching_user_message(
+        candidates: &mut Vec<(i64, String)>,
+        gmt_create: i64,
+    ) -> Option<String> {
+        const MAX_DIFF_MS: i64 = 5_000;
+        let mut best: Option<(usize, i64)> = None;
+        for (idx, (ts, _)) in candidates.iter().enumerate() {
+            if *ts == 0 {
+                continue;
+            }
+            let diff = (ts - gmt_create).abs();
+            if diff <= MAX_DIFF_MS && best.map(|(_, d)| diff < d).unwrap_or(true) {
+                best = Some((idx, diff));
+            }
+        }
+        best.map(|(idx, _)| candidates.remove(idx).1)
+    }
+
+    /// Extracts the plaintext text of a real user message from a transcript
+    /// line. Tool results also arrive under the `user` role but carry
+    /// block-array content, so only plain-string content counts.
+    fn extract_transcript_user_message(value: &serde_json::Value) -> Option<String> {
+        if value.get("type").and_then(|t| t.as_str()) != Some("user") {
+            return None;
+        }
+        let text = value.pointer("/message/content")?.as_str()?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.to_string())
     }
 
     fn ensure_cache(&self) -> Result<(), String> {
@@ -327,42 +466,64 @@ impl AgentAdapter for QoderAdapter {
         let mut messages = Vec::new();
         let mut seq: u32 = 0;
         let mut first_user_msg = true;
+        let mut input_tokens: u64 = 0;
+        let mut output_tokens: u64 = 0;
+        let mut cached_tokens: u64 = 0;
 
-        // session_title is the user's original query (stored in plaintext)
+        // The DB `content` column is encrypted, but plaintext copies of the
+        // user messages live in the transcript JSONL files. Match them by
+        // timestamp (DB and transcript entries are written at nearly the
+        // same instant); fall back to the session title for the first
+        // message when no transcript entry matches.
         let user_query = if !title.is_empty() {
             Some(title.clone())
         } else {
             None
         };
+        let mut transcript_user_msgs = snapshot
+            .user_messages
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
 
         for msg in &msg_rows {
             let ts = Self::ts_to_datetime(msg.gmt_create);
 
             match msg.role.as_str() {
                 "user" => {
-                    // Emit only the first user message using the readable session_title;
-                    // subsequent user messages are encrypted and add no value as placeholders.
-                    if first_user_msg {
-                        if let Some(ref query) = user_query {
-                            messages.push(Message {
-                                id: uuid::Uuid::new_v4().to_string(),
-                                session_id: session_id.clone(),
-                                role: MessageRole::User,
-                                content: query.clone(),
-                                timestamp: Some(ts),
-                                sequence: seq,
-                                tool_name: None,
-                                tool_input: None,
-                                tool_output: None,
+                    let content =
+                        Self::take_matching_user_message(&mut transcript_user_msgs, msg.gmt_create)
+                            .or_else(|| {
+                                if first_user_msg {
+                                    user_query.clone()
+                                } else {
+                                    None
+                                }
                             });
-                            seq += 1;
-                        }
-                        first_user_msg = false;
+                    if let Some(content) = content {
+                        messages.push(Message {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            session_id: session_id.clone(),
+                            role: MessageRole::User,
+                            content,
+                            timestamp: Some(ts),
+                            sequence: seq,
+                            tool_name: None,
+                            tool_input: None,
+                            tool_output: None,
+                        });
+                        seq += 1;
                     }
+                    first_user_msg = false;
                 }
                 "assistant" => {
                     // Assistant content is encrypted — skip to avoid noisy placeholders.
                     // Tool calls that follow carry the useful information.
+                    // Token usage, however, is stored in plaintext token_info.
+                    let (input, output, cached) = parse_token_info(msg.token_info.as_deref());
+                    input_tokens = input_tokens.saturating_add(input);
+                    output_tokens = output_tokens.saturating_add(output);
+                    cached_tokens = cached_tokens.saturating_add(cached);
                 }
                 "tool" => {
                     if let Some(ref tool_result_json) = msg.tool_result {
@@ -417,6 +578,9 @@ impl AgentAdapter for QoderAdapter {
             file_path: path.to_string_lossy().to_string(),
             is_active: session_row.status == "Running",
             message_count: messages.len() as u32,
+            input_tokens,
+            output_tokens,
+            cached_tokens,
             ..Default::default()
         };
 
@@ -448,5 +612,267 @@ impl AgentAdapter for QoderAdapter {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_token_info_extracts_buckets_and_subtracts_cached() {
+        let raw = r#"{"prompt_tokens":17604,"completion_tokens":226,"cached_tokens":13774,"max_input_tokens":180000}"#;
+        let (input, output, cached) = parse_token_info(Some(raw));
+        assert_eq!(input, 3830);
+        assert_eq!(output, 226);
+        assert_eq!(cached, 13774);
+    }
+
+    #[test]
+    fn parse_token_info_handles_zero_cache() {
+        let raw = r#"{"prompt_tokens":13777,"completion_tokens":185,"cached_tokens":0,"max_input_tokens":180000}"#;
+        let (input, output, cached) = parse_token_info(Some(raw));
+        assert_eq!(input, 13777);
+        assert_eq!(output, 185);
+        assert_eq!(cached, 0);
+    }
+
+    #[test]
+    fn parse_token_info_returns_zeros_for_none_empty_or_malformed() {
+        assert_eq!(parse_token_info(None), (0, 0, 0));
+        assert_eq!(parse_token_info(Some("")), (0, 0, 0));
+        assert_eq!(parse_token_info(Some("   ")), (0, 0, 0));
+        assert_eq!(parse_token_info(Some("not json")), (0, 0, 0));
+        assert_eq!(parse_token_info(Some("{}")), (0, 0, 0));
+    }
+
+    #[test]
+    fn parse_token_info_saturates_when_cached_exceeds_prompt() {
+        let raw = r#"{"prompt_tokens":10,"completion_tokens":5,"cached_tokens":20}"#;
+        let (input, output, cached) = parse_token_info(Some(raw));
+        assert_eq!(input, 0);
+        assert_eq!(output, 5);
+        assert_eq!(cached, 20);
+    }
+
+    #[test]
+    fn extract_transcript_user_message_reads_plain_string_content() {
+        let value = serde_json::json!({
+            "type": "user",
+            "sessionId": "sess-1",
+            "message": {"role": "user", "content": "Fix the adapter"}
+        });
+        assert_eq!(
+            QoderAdapter::extract_transcript_user_message(&value).as_deref(),
+            Some("Fix the adapter")
+        );
+    }
+
+    #[test]
+    fn extract_transcript_user_message_ignores_tool_results_and_other_types() {
+        let tool_result = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "tool_result", "content": "out"}]}
+        });
+        assert_eq!(QoderAdapter::extract_transcript_user_message(&tool_result), None);
+
+        let progress = serde_json::json!({"type": "progress", "data": {}});
+        assert_eq!(QoderAdapter::extract_transcript_user_message(&progress), None);
+
+        let empty = serde_json::json!({"type": "user", "message": {"role": "user", "content": "  "}});
+        assert_eq!(QoderAdapter::extract_transcript_user_message(&empty), None);
+    }
+
+    #[test]
+    fn scan_transcript_user_messages_collects_per_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript_dir = tmp.path().join("-some-project").join("transcript");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        std::fs::write(
+            transcript_dir.join("sess-1.jsonl"),
+            concat!(
+                r#"{"type":"session_meta","sessionId":"sess-1","timestamp":"2026-08-13T16:09:44.003Z","data":{}}"#,
+                "\n",
+                r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-08-13T16:09:44.004Z","message":{"role":"user","content":"First question"}}"#,
+                "\n",
+                r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-08-13T16:10:00.000Z","message":{"role":"user","content":[{"type":"tool_result"}]}}"#,
+                "\n",
+                r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-08-13T16:10:30.500Z","message":{"role":"user","content":"Follow up"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        // A project dir without a transcript/ subdir should be skipped.
+        std::fs::create_dir_all(tmp.path().join("-empty-project")).unwrap();
+
+        let map = QoderAdapter::scan_transcript_user_messages(tmp.path());
+        assert_eq!(
+            map.get("sess-1").map(|v| v.as_slice()),
+            Some(
+                [
+                    (1_786_637_384_004, "First question".to_string()),
+                    (1_786_637_430_500, "Follow up".to_string())
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn take_matching_user_message_pairs_by_closest_timestamp() {
+        let mut candidates = vec![
+            (1_000_000_000_000, "a".to_string()),
+            (1_000_000_060_000, "b".to_string()),
+        ];
+        // Picks the closest candidate and removes it.
+        assert_eq!(
+            QoderAdapter::take_matching_user_message(&mut candidates, 1_000_000_060_002),
+            Some("b".to_string())
+        );
+        assert_eq!(candidates.len(), 1);
+        // No candidate within the tolerance window.
+        assert_eq!(
+            QoderAdapter::take_matching_user_message(&mut candidates, 2_000_000_000_000),
+            None
+        );
+        assert_eq!(candidates.len(), 1);
+    }
+
+    fn session_row(session_id: &str, title: &str) -> QoderSessionRow {
+        QoderSessionRow {
+            session_id: session_id.to_string(),
+            session_title: title.to_string(),
+            project_uri: "/tmp/proj".to_string(),
+            gmt_create: 1_700_000_000_000,
+            gmt_modified: 1_700_000_100_000,
+            status: "Success".to_string(),
+        }
+    }
+
+    fn user_msg_row(session_id: &str, ts: i64) -> QoderMessageRow {
+        QoderMessageRow {
+            _id: format!("{}-{}", session_id, ts),
+            role: "user".to_string(),
+            tool_result: None,
+            gmt_create: ts,
+            token_info: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_session_prefers_transcript_user_messages_over_title() {
+        let adapter = QoderAdapter::new();
+        {
+            let mut cache = adapter.cache.lock().unwrap();
+            let mut messages = HashMap::new();
+            messages.insert(
+                "sess-1".to_string(),
+                vec![
+                    user_msg_row("sess-1", 1_700_000_000_000),
+                    user_msg_row("sess-1", 1_700_000_050_000),
+                ],
+            );
+            let mut user_messages = HashMap::new();
+            user_messages.insert(
+                "sess-1".to_string(),
+                vec![
+                    (1_700_000_000_001, "Actual first question".to_string()),
+                    (1_700_000_049_999, "Actual follow up".to_string()),
+                ],
+            );
+            *cache = Some(QoderDbSnapshot {
+                sessions: vec![session_row("sess-1", "Generated Title")],
+                messages,
+                user_messages,
+            });
+        }
+
+        let parsed = adapter
+            .parse_session(Path::new("qoder://session/sess-1"))
+            .await
+            .unwrap();
+
+        assert_eq!(parsed.session.title, "Generated Title");
+        let user_msgs: Vec<&Message> = parsed
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .collect();
+        assert_eq!(user_msgs.len(), 2);
+        assert_eq!(user_msgs[0].content, "Actual first question");
+        assert_eq!(user_msgs[1].content, "Actual follow up");
+    }
+
+    #[tokio::test]
+    async fn parse_session_aligns_partial_transcript_with_old_db_rows() {
+        // The transcript may only cover recent turns of a long-lived session;
+        // the plaintext message must pair with the matching DB row, not the
+        // first one.
+        let adapter = QoderAdapter::new();
+        {
+            let mut cache = adapter.cache.lock().unwrap();
+            let mut messages = HashMap::new();
+            messages.insert(
+                "sess-3".to_string(),
+                vec![
+                    user_msg_row("sess-3", 1_690_000_000_000),
+                    user_msg_row("sess-3", 1_700_000_050_000),
+                ],
+            );
+            let mut user_messages = HashMap::new();
+            user_messages.insert(
+                "sess-3".to_string(),
+                vec![(1_700_000_050_001, "Recent turn".to_string())],
+            );
+            *cache = Some(QoderDbSnapshot {
+                sessions: vec![session_row("sess-3", "Session Title")],
+                messages,
+                user_messages,
+            });
+        }
+
+        let parsed = adapter
+            .parse_session(Path::new("qoder://session/sess-3"))
+            .await
+            .unwrap();
+
+        let user_msgs: Vec<&Message> = parsed
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .collect();
+        assert_eq!(user_msgs.len(), 2);
+        // Old row without transcript coverage falls back to the title.
+        assert_eq!(user_msgs[0].content, "Session Title");
+        assert_eq!(user_msgs[1].content, "Recent turn");
+    }
+
+    #[tokio::test]
+    async fn parse_session_falls_back_to_title_without_transcript() {
+        let adapter = QoderAdapter::new();
+        {
+            let mut cache = adapter.cache.lock().unwrap();
+            let mut messages = HashMap::new();
+            messages.insert("sess-2".to_string(), vec![user_msg_row("sess-2", 1_700_000_000_000)]);
+            *cache = Some(QoderDbSnapshot {
+                sessions: vec![session_row("sess-2", "Only Title Available")],
+                messages,
+                user_messages: HashMap::new(),
+            });
+        }
+
+        let parsed = adapter
+            .parse_session(Path::new("qoder://session/sess-2"))
+            .await
+            .unwrap();
+
+        let user_msgs: Vec<&Message> = parsed
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .collect();
+        assert_eq!(user_msgs.len(), 1);
+        assert_eq!(user_msgs[0].content, "Only Title Available");
     }
 }
