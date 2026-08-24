@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.11.0
+
+### Search
+
+- **FTS5-powered session search** — queries now run against the `messages_fts` full-text index instead of a brute-force LIKE scan over every message's content, tool input, and tool output
+- Token + word-prefix matching: `auth` finds "authentication" (mid-word substrings like `rror` no longer match — the trade-off for indexed, ranked search)
+- Multi-word queries: every term must match somewhere in the session, and terms may hit different messages
+- Relevance ordering while searching: title matches first, then best-message bm25 rank, then recency
+- Automatic fallback to the previous LIKE scan if the FTS query fails
+
+### Technical
+
+- `get_sessions` builds a safe FTS5 MATCH expression from raw input (quoted prefix terms neutralize FTS query syntax such as `(`, `*`, `NEAR`)
+- Ranking CTE computes each session's best bm25 rank; per-term subqueries enforce session-level AND semantics
+- Removed the unused `search_sessions` command and `search_messages` query
+- Parameterized `LIMIT`/`OFFSET` in `get_sessions`
+- Version bumped to 0.11.0
+
 ## v0.10.0
 
 ### New Agent Adapter
