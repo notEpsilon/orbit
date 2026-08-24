@@ -40,7 +40,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_sessions,
             commands::get_session_messages,
-            commands::search_sessions,
             commands::get_platform,
             commands::get_resume_command,
             commands::launch_resume,

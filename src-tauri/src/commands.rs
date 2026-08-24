@@ -359,20 +359,6 @@ pub async fn get_session_messages(
 }
 
 #[tauri::command]
-pub async fn search_sessions(
-    state: State<'_, AppState>,
-    query: String,
-    _filters: SessionFilters,
-    limit: Option<u32>,
-) -> Result<Vec<Message>, String> {
-    let db = state.db.lock().await;
-    let queries = DbQueries::new(&db);
-    queries
-        .search_messages(&query, limit.unwrap_or(50))
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 pub async fn get_resume_command(
     state: State<'_, AppState>,
     session_id: String,

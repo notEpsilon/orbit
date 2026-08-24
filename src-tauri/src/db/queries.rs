@@ -27,6 +27,16 @@ pub struct DbQueries<'a> {
     conn: &'a Connection,
 }
 
+/// Convert raw user input into safe FTS5 MATCH terms: each whitespace token
+/// becomes a quoted prefix term (`"tok"*`). Quoting neutralizes FTS5 query
+/// syntax (`(`, `*`, `NEAR`, ...) in user input.
+fn build_fts_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|token| format!("\"{}\"*", token.replace('"', "\"\"")))
+        .collect()
+}
+
 impl<'a> DbQueries<'a> {
     pub fn new(conn: &'a Connection) -> Self {
         Self { conn }
@@ -202,9 +212,40 @@ impl<'a> DbQueries<'a> {
         offset: u32,
         limit: u32,
     ) -> Result<Vec<Session>> {
+        let fts_terms = if filters
+            .query
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+        {
+            Vec::new()
+        } else {
+            build_fts_terms(filters.query.as_deref().unwrap_or_default())
+        };
+
+        if !fts_terms.is_empty() {
+            match self.get_sessions_inner(filters, offset, limit, Some(&fts_terms)) {
+                Ok(sessions) => return Ok(sessions),
+                Err(e) => {
+                    tracing::warn!("FTS search failed, falling back to LIKE scan: {}", e);
+                }
+            }
+        }
+        self.get_sessions_inner(filters, offset, limit, None)
+    }
+
+    fn get_sessions_inner(
+        &self,
+        filters: &SessionFilters,
+        offset: u32,
+        limit: u32,
+        fts_terms: Option<&[String]>,
+    ) -> Result<Vec<Session>> {
         let mut sql = String::from(
             "SELECT id, parent_session_id, agent, title, project_path, created_at, updated_at, file_path, is_active, message_count, model, git_branch, input_tokens, output_tokens, cached_tokens, reasoning_tokens, file_count FROM sessions WHERE 1=1",
         );
+        let mut cte = String::new();
+        let mut order_override: Option<String> = None;
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut param_idx = 1;
 
@@ -273,18 +314,71 @@ impl<'a> DbQueries<'a> {
         if let Some(ref query) = filters.query {
             if !query.is_empty() {
                 let like_pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
-                sql.push_str(&format!(
-                    " AND (title LIKE ?{} ESCAPE '\\' OR id IN (SELECT session_id FROM messages WHERE content LIKE ?{} ESCAPE '\\' OR tool_input LIKE ?{} ESCAPE '\\' OR tool_output LIKE ?{} ESCAPE '\\'))",
-                    param_idx, param_idx, param_idx, param_idx
-                ));
-                param_values.push(Box::new(like_pattern));
+                if let Some(terms) = fts_terms {
+                    // Ranking CTE: best (lowest) bm25 rank of any message matching
+                    // any term. MATCH is row-scoped, so the OR expression covers
+                    // every matching message; the per-term subqueries below then
+                    // require each term to match somewhere in the session.
+                    let or_expr = terms
+                        .iter()
+                        .map(|t| format!("({})", t))
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                    let match_idx = param_idx;
+                    param_values.push(Box::new(or_expr));
+                    param_idx += 1;
+                    let title_idx = param_idx;
+                    param_values.push(Box::new(like_pattern));
+                    param_idx += 1;
+
+                    cte = format!(
+                        "WITH fts_matches(sid, best) AS (SELECT m.session_id, MIN(fts.rank) FROM messages m JOIN messages_fts fts ON m.rowid = fts.rowid WHERE messages_fts MATCH ?{} GROUP BY m.session_id) ",
+                        match_idx
+                    );
+                    // Title match, or every term matches somewhere in the
+                    // session (each term may hit a different message).
+                    sql.push_str(&format!(
+                        " AND (title LIKE ?{title_idx} ESCAPE '\\' OR ("
+                    ));
+                    for (i, term) in terms.iter().enumerate() {
+                        if i > 0 {
+                            sql.push_str(" AND ");
+                        }
+                        sql.push_str(&format!(
+                            "id IN (SELECT m.session_id FROM messages m JOIN messages_fts fts ON m.rowid = fts.rowid WHERE messages_fts MATCH ?{})",
+                            param_idx
+                        ));
+                        param_values.push(Box::new(term.clone()));
+                        param_idx += 1;
+                    }
+                    sql.push_str("))");
+                    // Title hits first, then sessions whose best-matching message has the
+                    // lowest bm25 rank (more negative = better), recency as tiebreak.
+                    order_override = Some(format!(
+                        "CASE WHEN title LIKE ?{title_idx} ESCAPE '\\' THEN 0 ELSE 1 END, COALESCE((SELECT best FROM fts_matches WHERE sid = sessions.id), 9e99) ASC, updated_at DESC"
+                    ));
+                } else {
+                    sql.push_str(&format!(
+                        " AND (title LIKE ?{} ESCAPE '\\' OR id IN (SELECT session_id FROM messages WHERE content LIKE ?{} ESCAPE '\\' OR tool_input LIKE ?{} ESCAPE '\\' OR tool_output LIKE ?{} ESCAPE '\\'))",
+                        param_idx, param_idx, param_idx, param_idx
+                    ));
+                    param_values.push(Box::new(like_pattern));
+                    param_idx += 1;
+                }
             }
         }
 
-        sql.push_str(" ORDER BY updated_at DESC");
-        sql.push_str(&format!(" LIMIT {} OFFSET {}", limit, offset));
+        if let Some(order) = order_override {
+            sql.push_str(&format!(" ORDER BY {}", order));
+        } else {
+            sql.push_str(" ORDER BY updated_at DESC");
+        }
+        sql.push_str(&format!(" LIMIT ?{} OFFSET ?{}", param_idx, param_idx + 1));
+        param_values.push(Box::new(limit as i64));
+        param_values.push(Box::new(offset as i64));
 
-        let mut stmt = self.conn.prepare(&sql)?;
+        let full_sql = format!("{}{}", cte, sql);
+        let mut stmt = self.conn.prepare(&full_sql)?;
         let params_refs: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
 
@@ -446,41 +540,6 @@ impl<'a> DbQueries<'a> {
             [],
         )?;
         Ok(deleted as u64)
-    }
-
-    pub fn search_messages(&self, query: &str, limit: u32) -> Result<Vec<Message>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.session_id, m.role, m.content, m.timestamp, m.sequence, m.tool_name, m.tool_input, m.tool_output
-             FROM messages m
-             INNER JOIN messages_fts fts ON m.rowid = fts.rowid
-             WHERE messages_fts MATCH ?1
-             ORDER BY rank
-             LIMIT ?2",
-        )?;
-
-        let messages = stmt
-            .query_map(params![query, limit], |row| {
-                let ts_str: Option<String> = row.get(4)?;
-                let timestamp = ts_str
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                    .map(|dt| dt.with_timezone(&chrono::Utc));
-                Ok(Message {
-                    id: row.get(0)?,
-                    session_id: row.get(1)?,
-                    role: MessageRole::from_str(&row.get::<_, String>(2)?)
-                        .unwrap_or(MessageRole::User),
-                    content: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    timestamp,
-                    sequence: row.get(5)?,
-                    tool_name: row.get(6)?,
-                    tool_input: row.get(7)?,
-                    tool_output: row.get(8)?,
-                })
-            })?
-            .filter_map(|m| m.ok())
-            .collect();
-
-        Ok(messages)
     }
 
     pub fn get_active_session_ids(&self) -> Result<Vec<String>> {
@@ -658,5 +717,188 @@ mod tests {
         assert_eq!(bar.operation, "read");
         assert_eq!(bar.touch_count, 1);
         assert_eq!(bar.first_touched_sequence, 5);
+    }
+
+    fn make_message(session_id: &str, id: &str, content: &str, sequence: u32) -> Message {
+        Message {
+            id: id.to_string(),
+            session_id: session_id.to_string(),
+            role: MessageRole::Assistant,
+            content: content.to_string(),
+            timestamp: None,
+            sequence,
+            tool_name: None,
+            tool_input: None,
+            tool_output: None,
+        }
+    }
+
+    fn query_filters(query: &str) -> SessionFilters {
+        SessionFilters {
+            agent: None,
+            agents: None,
+            title: None,
+            project_path: None,
+            model: None,
+            date_from: None,
+            date_to: None,
+            is_active: None,
+            query: Some(query.to_string()),
+            git_branch: None,
+        }
+    }
+
+    fn seed(q: &DbQueries, session: &Session, messages: &[Message]) {
+        q.upsert_session(session).unwrap();
+        for m in messages {
+            q.insert_message(m).unwrap();
+        }
+        // messages_fts is external-content, so it only sees rows after a rebuild.
+        q.rebuild_fts().unwrap();
+    }
+
+    #[test]
+    fn search_matches_message_content_via_fts() {
+        let conn = fresh();
+        let q = DbQueries::new(&conn);
+        let mut s = make_session("s1");
+        s.title = "Unrelated title".to_string();
+        seed(
+            &q,
+            &s,
+            &[make_message(
+                "s1",
+                "m1",
+                "fix the authentication bug",
+                0,
+            )],
+        );
+
+        let rows = q.get_sessions(&query_filters("authentication"), 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "s1");
+    }
+
+    #[test]
+    fn search_prefix_matches_word_start() {
+        let conn = fresh();
+        let q = DbQueries::new(&conn);
+        let mut s = make_session("s1");
+        s.title = "Unrelated".to_string();
+        seed(&q, &s, &[make_message("s1", "m1", "authentication layer", 0)]);
+
+        let rows = q.get_sessions(&query_filters("auth"), 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+
+        let none = q.get_sessions(&query_filters("zzz"), 0, 10).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn search_multiword_matches_across_messages() {
+        let conn = fresh();
+        let q = DbQueries::new(&conn);
+        let mut s = make_session("s1");
+        s.title = "Unrelated".to_string();
+        seed(
+            &q,
+            &s,
+            &[
+                make_message("s1", "m1", "fix the parser", 0),
+                make_message("s1", "m2", "handler registered", 1),
+            ],
+        );
+
+        // LIKE requires the literal contiguous substring; FTS matches tokens
+        // wherever they appear in the session.
+        let rows = q.get_sessions(&query_filters("fix handler"), 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "s1");
+    }
+
+    #[test]
+    fn search_orders_title_first_then_rank_then_recency() {
+        let conn = fresh();
+        let q = DbQueries::new(&conn);
+        let now = Utc::now();
+
+        let mut t1 = make_session("t1");
+        t1.title = "Auth refactor".to_string();
+        t1.updated_at = now - chrono::Duration::hours(2);
+
+        let mut t2 = make_session("t2");
+        t2.title = "Auth cleanup".to_string();
+        t2.updated_at = now - chrono::Duration::hours(1);
+
+        let mut t3 = make_session("t3");
+        t3.title = "Unrelated".to_string();
+        t3.updated_at = now;
+
+        seed(
+            &q,
+            &t1,
+            &[make_message("t1", "m1", "authenticate the user", 0)],
+        );
+        seed(&q, &t2, &[]);
+        seed(
+            &q,
+            &t3,
+            &[make_message("t3", "m3", "authentication notes", 0)],
+        );
+
+        let rows = q.get_sessions(&query_filters("auth"), 0, 10).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|s| s.id.as_str()).collect();
+        // t1: title + content match (real bm25 rank), t2: title-only match
+        // (no rank, sorts after t1 despite being newer), t3: content-only
+        // match (second bucket).
+        assert_eq!(ids, vec!["t1", "t2", "t3"]);
+    }
+
+    #[test]
+    fn search_no_longer_matches_midword_substring() {
+        let conn = fresh();
+        let q = DbQueries::new(&conn);
+        let mut s = make_session("s1");
+        s.title = "Unrelated".to_string();
+        seed(&q, &s, &[make_message("s1", "m1", "error handling", 0)]);
+
+        let rows = q.get_sessions(&query_filters("rror"), 0, 10).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn search_combines_with_agent_filter() {
+        let conn = fresh();
+        let q = DbQueries::new(&conn);
+
+        let mut s1 = make_session("s1");
+        s1.title = "Unrelated".to_string();
+        let mut s2 = make_session("s2");
+        s2.title = "Unrelated".to_string();
+        s2.agent = AgentType::Codex;
+
+        seed(&q, &s1, &[make_message("s1", "m1", "authentication layer", 0)]);
+        seed(&q, &s2, &[make_message("s2", "m2", "authentication layer", 0)]);
+
+        let mut filters = query_filters("auth");
+        filters.agents = Some(vec!["claude".to_string()]);
+
+        let rows = q.get_sessions(&filters, 0, 10).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["s1"]);
+    }
+
+    #[test]
+    fn search_tolerates_fts_hostile_input() {
+        let conn = fresh();
+        let q = DbQueries::new(&conn);
+        let mut s = make_session("s1");
+        s.title = "Some session".to_string();
+        seed(&q, &s, &[make_message("s1", "m1", "error handling", 0)]);
+
+        for hostile in ["*", "()", "NEAR", "\"", "a AND OR NOT ( ) b"] {
+            let result = q.get_sessions(&query_filters(hostile), 0, 10);
+            assert!(result.is_ok(), "query {:?} should not error", hostile);
+        }
     }
 }

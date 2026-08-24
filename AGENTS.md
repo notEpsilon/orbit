@@ -53,7 +53,7 @@ The app follows Tauri v2's split architecture:
 2. Active session polling runs every 5 seconds via `refreshActiveSessions` → `get_active_sessions`.
 3. Selecting a session calls `get_session_messages` → loads `Message[]` into the store. `messageRoleFilter` resets to null.
 4. Reindex button triggers `reindex_all` → Rust scans all adapters, parses new/changed session files, upserts to DB, rebuilds FTS. Status bar shows "Indexed X of Y sessions". Errors shown in the empty state.
-5. Search uses LIKE queries in `get_sessions` (not FTS5 MATCH) — searches across `title` and message `content`/`tool_input`/`tool_output`. Keywords are highlighted in the session list and transcript via the `Highlight` component.
+5. Search goes through `get_sessions` with `filters.query`: an FTS5 MATCH against `messages_fts` (token + word-prefix terms; every term must match somewhere in the session, possibly different messages) OR a title LIKE. Results are ordered by title hits first, then bm25 rank, then recency. Keywords are highlighted in the session list and transcript via the `Highlight` component (literal substring matching, so prefix/multi-word hits may not render marks).
 
 ### Adding a new agent adapter
 
@@ -72,7 +72,7 @@ The app follows Tauri v2's split architecture:
 
 ### Database
 
-SQLite with WAL mode. Three tables: `sessions`, `messages`, `attachments`. FTS5 virtual table `messages_fts` indexes `content`, `tool_input`, `tool_output` from messages. The `source_hash` column on sessions stores a `"size:mtime"` string for change detection. Search queries use LIKE (not FTS5 MATCH) for robustness with arbitrary user input.
+SQLite with WAL mode. Three tables: `sessions`, `messages`, `attachments`. FTS5 virtual table `messages_fts` indexes `content`, `tool_input`, `tool_output` from messages. The `source_hash` column on sessions stores a `"size:mtime"` string for change detection. Search queries go through `messages_fts` MATCH (token + prefix terms, bm25 ranking, title matches first); if the FTS query fails, `get_sessions` falls back to a LIKE scan. Note the FTS index is external-content and only refreshed by the indexer's `rebuild_fts()` after a reindex.
 
 ### Known issues
 
